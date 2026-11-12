@@ -1,0 +1,704 @@
+--- a/app/lib/ui/plugins/native/composer_capsules.dart
++++ b/app/lib/ui/plugins/native/composer_capsules.dart
+@@ -11,13 +11,14 @@
+ 
+ import 'dart:async';
+ 
+-import 'package:dsh_client/dsh_client.dart' show DshGoScope;
++import 'package:dsh_client/dsh_client.dart' show DshGoScope, PluginBundle;
+ import 'package:flutter/material.dart';
+ import 'package:flutter_riverpod/flutter_riverpod.dart';
+ 
+ import '../../../l10n/l10n.dart';
+ import '../../../plugins/native/native_model.dart';
+ import '../../../plugins/native/native_state.dart';
++import '../../../state/plugins/installed_plugins.dart';
+ import '../../../ui_config/ui_config_model.dart';
+ import '../../../ui_config/ui_config_state.dart';
+ import '../../common/edge_fade.dart';
+@@ -28,10 +29,28 @@
+ import 'native_taps.dart';
+ import 'rise_reveal.dart';
+ 
++/// 胶囊状态：运行中 / 已启用（静止）/ 已禁用 / 报错。
++///
++/// 只在插件贡献的胶囊上有意义；ui.json 的快捷胶囊保持 [enabled]。
++/// 排在最前的是 [running]，[error] 排最后。
++enum CapsuleStatus { running, enabled, disabled, error }
++
+ /// One capsule.
+ @immutable
+ class CapsuleItem {
+-  const CapsuleItem({required this.id, required this.label, this.icon, this.source, this.busyKey, required this.onTap});
++  const CapsuleItem({
++    required this.id,
++    required this.label,
++    this.icon,
++    this.source,
++    this.busyKey,
++    required this.onTap,
++    this.status = CapsuleStatus.enabled,
++    this.tooltip,
++    this.selected = false,
++    this.tags = const <String>[],
++    this.onLongPress,
++  });
+ 
+   /// Stable across rebuilds (`ui:2`, `<package>#<id>`).
+   final String id;
+@@ -45,6 +64,39 @@
+   /// that never waits.
+   final String? busyKey;
+   final VoidCallback onTap;
++
++  /// 运行 / 启用 / 禁用 / 报错，用来在胶囊尾部点一个小圆点。
++  final CapsuleStatus status;
++
++  /// 长按与悬停时显示的一句话：插件说明、版本、作者，由调用方拼好。
++  final String? tooltip;
++
++  /// 选中态：只加一层很淡的主题色底，形状和尺寸不变。
++  final bool selected;
++
++  /// 标签筛选用的标签（官方 / 本地 / 插件表面），只参与过滤。
++  final List<String> tags;
++
++  /// 长按：打开筛选与批量管理（只有插件胶囊带）。
++  final VoidCallback? onLongPress;
++
++  /// 排序权重：运行中优先，报错最后。
++  int get rank => switch (status) {
++    CapsuleStatus.running => 0,
++    CapsuleStatus.enabled => 1,
++    CapsuleStatus.disabled => 2,
++    CapsuleStatus.error => 3,
++  };
++}
++
++/// 稳定排序：同权重保持原顺序（ui.json 的顺序、插件的注册顺序都不打乱）。
++List<CapsuleItem> sortCapsules(List<CapsuleItem> items) {
++  final indexed = [for (final (i, item) in items.indexed) (i, item)];
++  indexed.sort((a, b) {
++    final byRank = a.$2.rank.compareTo(b.$2.rank);
++    return byRank != 0 ? byRank : a.$1.compareTo(b.$1);
++  });
++  return [for (final (_, item) in indexed) item];
+ }
+ 
+ /// Capsule geometry, shared with the geometry tests.
+@@ -56,8 +108,14 @@
+   static const icon = 16.0;
+   static const iconGap = 6.0;
+ 
+-  /// Between capsules.
+-  static const gap = 8.0;
++  /// Between capsules（比原先的 8 放宽到 12，胶囊不再挤在一起）。
++  static const gap = 12.0;
++
++  /// 悬停时整体上浮的距离；低调，不改变行高。
++  static const hoverLift = 1.5;
++
++  /// 悬停时的柔和投影（只在指针设备上出现）。
++  static const hoverShadowBlur = 10.0;
+ 
+   /// Between the row and the composer (the banners' rhythm).
+   static const below = 8.0;
+@@ -66,7 +124,11 @@
+ /// A glass capsule: an optional icon and a label, the same air left and
+ /// right, the height of the row. At work, its content gives way to a small
+ /// ring in the middle: the capsule keeps its size, nothing moves.
+-class ComposerCapsule extends ConsumerWidget {
++///
++/// 视觉只在原有基础上加强：形状仍是胶囊、尺寸不变；悬停上浮 + 柔和投影，
++/// 选中加一层很淡的主题色底，尾部小圆点标插件状态。单个胶囊渲染异常会
++/// 退化成占位，不会让整行消失。
++class ComposerCapsule extends ConsumerStatefulWidget {
+   const ComposerCapsule({super.key, required this.item});
+ 
+   final CapsuleItem item;
+@@ -75,7 +137,24 @@
+   static const ring = 14.0;
+ 
+   @override
+-  Widget build(BuildContext context, WidgetRef ref) {
++  ConsumerState<ComposerCapsule> createState() => _ComposerCapsuleState();
++}
++
++class _ComposerCapsuleState extends ConsumerState<ComposerCapsule> {
++  bool _hovered = false;
++
++  CapsuleItem get item => widget.item;
++
++  @override
++  Widget build(BuildContext context) {
++    try {
++      return _build(context);
++    } catch (_) {
++      return _fallback(context);
++    }
++  }
++
++  Widget _build(BuildContext context) {
+     final theme = Theme.of(context);
+     final colors = theme.colorScheme;
+     final style = theme.textTheme.labelMedium?.copyWith(color: colors.onSurface, fontWeight: FontWeight.w500);
+@@ -87,6 +166,68 @@
+     final cancel = work?.cancel;
+     final duration = AppMotion.of(context, AppMotion.quick);
+     final l10n = context.l10n;
++
++    Widget surface = GlassSurface(
++      tier: GlassTier.chrome,
++      stadium: true,
++      grouped: true,
++      onTap: busy ? cancel : item.onTap,
++      onLongPress: item.onLongPress,
++      child: SizedBox(
++        height: CapsuleMetrics.height,
++        child: Stack(
++          alignment: Alignment.center,
++          children: [
++            AnimatedOpacity(
++              opacity: busy ? 0 : 1,
++              duration: duration,
++              child: Padding(
++                padding: const EdgeInsets.symmetric(horizontal: CapsuleMetrics.inset),
++                child: Row(
++                  mainAxisSize: MainAxisSize.min,
++                  children: [
++                    if (item.icon case final icon?) ...[
++                      Icon(icon, size: CapsuleMetrics.icon, color: colors.onSurfaceVariant),
++                      const SizedBox(width: CapsuleMetrics.iconGap),
++                    ],
++                    Text(item.label, maxLines: 1, softWrap: false, style: style),
++                    if (item.status != CapsuleStatus.enabled) ...[const SizedBox(width: 6), _statusDot(colors)],
++                  ],
++                ),
++              ),
++            ),
++            AnimatedOpacity(
++              opacity: busy ? 1 : 0,
++              duration: duration,
++              child: SizedBox.square(
++                key: busy ? const ValueKey('capsule-ring') : null,
++                dimension: ComposerCapsule.ring,
++                child: busy
++                    ? CircularProgressIndicator(strokeWidth: 1.6, color: colors.onSurfaceVariant)
++                    : const SizedBox.shrink(),
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++
++    // 选中态：只在玻璃后面垫一层很淡的主题色，形状与尺寸都不变。
++    if (item.selected) {
++      surface = DecoratedBox(
++        decoration: BoxDecoration(
++          color: colors.primary.withValues(alpha: 0.10),
++          borderRadius: BorderRadius.circular(CapsuleMetrics.height / 2),
++        ),
++        child: surface,
++      );
++    }
++
++    // 悬停提示：插件说明 / 版本 / 作者，由调用方拼进 tooltip。
++    if (item.tooltip case final tip? when tip.isNotEmpty) {
++      surface = Tooltip(message: tip, waitDuration: const Duration(milliseconds: 500), child: surface);
++    }
++
+     return Semantics(
+       button: true,
+       label: busy ? '${item.label} ${work.label ?? l10n.plugslotsWorking}' : item.label,
+@@ -96,46 +237,75 @@
+           ? null
+           : l10n.plugslotsFromPlugin(source),
+       excludeSemantics: true,
+-      child: GlassSurface(
+-        tier: GlassTier.chrome,
+-        stadium: true,
+-        grouped: true,
+-        onTap: busy ? cancel : item.onTap,
+-        child: SizedBox(
+-          height: CapsuleMetrics.height,
+-          child: Stack(
+-            alignment: Alignment.center,
+-            children: [
+-              AnimatedOpacity(
+-                opacity: busy ? 0 : 1,
+-                duration: duration,
+-                child: Padding(
+-                  padding: const EdgeInsets.symmetric(horizontal: CapsuleMetrics.inset),
+-                  child: Row(
+-                    mainAxisSize: MainAxisSize.min,
+-                    children: [
+-                      if (item.icon case final icon?) ...[
+-                        Icon(icon, size: CapsuleMetrics.icon, color: colors.onSurfaceVariant),
+-                        const SizedBox(width: CapsuleMetrics.iconGap),
+-                      ],
+-                      Text(item.label, maxLines: 1, softWrap: false, style: style),
+-                    ],
+-                  ),
+-                ),
+-              ),
+-              AnimatedOpacity(
+-                opacity: busy ? 1 : 0,
+-                duration: duration,
+-                child: SizedBox.square(
+-                  key: busy ? const ValueKey('capsule-ring') : null,
+-                  dimension: ring,
+-                  child: busy
+-                      ? CircularProgressIndicator(strokeWidth: 1.6, color: colors.onSurfaceVariant)
+-                      : const SizedBox.shrink(),
+-                ),
+-              ),
+-            ],
++      child: MouseRegion(
++        onEnter: (_) => _setHovered(true),
++        onExit: (_) => _setHovered(false),
++        child: AnimatedContainer(
++          duration: duration,
++          curve: Curves.easeOutCubic,
++          transform: Matrix4.translationValues(0, _hovered ? -CapsuleMetrics.hoverLift : 0, 0),
++          decoration: BoxDecoration(
++            borderRadius: BorderRadius.circular(CapsuleMetrics.height / 2),
++            boxShadow: _hovered
++                ? [
++                    BoxShadow(
++                      color: colors.shadow.withValues(alpha: 0.18),
++                      blurRadius: CapsuleMetrics.hoverShadowBlur,
++                      offset: const Offset(0, 3),
++                    ),
++                  ]
++                : const <BoxShadow>[],
+           ),
++          child: surface,
++        ),
++      ),
++    );
++  }
++
++  void _setHovered(bool value) {
++    if (!mounted || _hovered == value) return;
++    setState(() => _hovered = value);
++  }
++
++  Widget _statusDot(ColorScheme colors) {
++    final color = switch (item.status) {
++      CapsuleStatus.running => colors.primary,
++      CapsuleStatus.disabled => colors.outline,
++      CapsuleStatus.error => colors.error,
++      CapsuleStatus.enabled => colors.onSurfaceVariant,
++    };
++    return Container(
++      width: 6,
++      height: 6,
++      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
++    );
++  }
++
++  /// 兜底：数据坏了也占住同样的位置，告诉用户“这个胶囊出问题了”。
++  Widget _fallback(BuildContext context) {
++    final colors = Theme.of(context).colorScheme;
++    return Tooltip(
++      message: item.label,
++      child: Container(
++        height: CapsuleMetrics.height,
++        padding: const EdgeInsets.symmetric(horizontal: CapsuleMetrics.inset),
++        decoration: BoxDecoration(
++          color: colors.errorContainer.withValues(alpha: 0.35),
++          borderRadius: BorderRadius.circular(CapsuleMetrics.height / 2),
++          border: Border.all(color: colors.error.withValues(alpha: 0.35)),
++        ),
++        child: Row(
++          mainAxisSize: MainAxisSize.min,
++          children: [
++            Icon(Icons.error_outline, size: CapsuleMetrics.icon, color: colors.error),
++            const SizedBox(width: CapsuleMetrics.iconGap),
++            Text(
++              item.label,
++              maxLines: 1,
++              softWrap: false,
++              style: Theme.of(context).textTheme.labelMedium?.copyWith(color: colors.onErrorContainer),
++            ),
++          ],
+         ),
+       ),
+     );
+@@ -214,6 +384,24 @@
+   );
+ }
+ 
++/// 插件胶囊的状态：报错优先于禁用，其余按运行中算。
++CapsuleStatus capsuleStatusOf(PluginBundle? bundle) {
++  if (bundle == null) return CapsuleStatus.running;
++  if (bundle.error != null) return CapsuleStatus.error;
++  return bundle.enabled ? CapsuleStatus.running : CapsuleStatus.disabled;
++}
++
++/// 悬停提示：名称、版本、说明；作者字段客户端没暴露，就不写。
++String capsuleTooltipOf(PluginBundle? bundle, String title) {
++  if (bundle == null) return title;
++  final parts = <String>[title];
++  final version = bundle.version;
++  if (version != null && version.isNotEmpty) parts.add('v$version');
++  final description = bundle.description?.trim();
++  if (description != null && description.isNotEmpty) parts.add(description);
++  return parts.join('\n');
++}
++
+ /// The capsules of the composer on screen, in order: ui.json's (commands
+ /// only with a conversation open), then each plugin's switched-on ones, at
+ /// most [NativeLimits.capsulesTotal].
+@@ -223,15 +411,21 @@
+   required String? sessionId,
+   required List<UiQuickAction> quick,
+   required List<NativeAction> plugins,
++  VoidCallback? onLongPress,
+ }) {
+-  final items = <CapsuleItem>[];
++  final quickItems = <CapsuleItem>[];
+   for (final (i, q) in quick.indexed) {
+     if (q.action is UiCommandAction && sessionId == null) continue;
+-    items.add(CapsuleItem(id: 'ui:$i', label: q.label, onTap: () => unawaited(runUiAction(context, ref, q.action))));
++    quickItems.add(
++      CapsuleItem(id: 'ui:$i', label: q.label, onTap: () => unawaited(runUiAction(context, ref, q.action))),
++    );
+   }
++  final bundles = ref.watch(installedPluginsProvider.select((s) => s.value)) ?? const <PluginBundle>[];
++  final byName = {for (final b in bundles) b.name: b};
++  final pluginItems = <CapsuleItem>[];
+   for (final a in plugins) {
+-    if (items.length >= NativeLimits.capsulesTotal) break;
+-    items.add(
++    if (quickItems.length + pluginItems.length >= NativeLimits.capsulesTotal) break;
++    pluginItems.add(
+       CapsuleItem(
+         id: '${a.package}#${a.id}',
+         label: a.label,
+@@ -239,9 +433,15 @@
+         source: ref.read(nativePluginTitleProvider(a.package)),
+         busyKey: a.effects.isEmpty ? nativeControlKey(a.package, a.surface, a.id) : null,
+         onTap: () => unawaited(runNativeAction(context, ref, a, scope: DshGoScope(sessionId: sessionId))),
++        status: capsuleStatusOf(byName[a.package]),
++        tooltip: capsuleTooltipOf(byName[a.package], ref.read(nativePluginTitleProvider(a.package))),
++        tags: [byName[a.package]?.official == true ? 'official' : 'local'],
++        onLongPress: onLongPress,
+       ),
+     );
+   }
++  // 插件胶囊按状态排：运行中优先，报错垫底；ui.json 的保持原顺序排在最前。
++  final items = <CapsuleItem>[...quickItems, ...sortCapsules(pluginItems)];
+   return items.length > NativeLimits.capsulesTotal ? items.sublist(0, NativeLimits.capsulesTotal) : items;
+ }
+ 
+@@ -265,6 +465,33 @@
+   List<CapsuleItem> _last = const [];
+   Widget? _lastLeading;
+ 
++  /// 筛选态：空集合＝不按标签筛；默认不隐藏禁用项（一眼能看到谁被关了）。
++  final Set<String> _tags = <String>{};
++  bool _hideDisabled = false;
++
++  bool _visible(CapsuleItem item) =>
++      !(_hideDisabled && item.status == CapsuleStatus.disabled) && (_tags.isEmpty || item.tags.any(_tags.contains));
++
++  void _openManage() {
++    final bundles = ref.read(installedPluginsProvider.select((s) => s.value)) ?? const <PluginBundle>[];
++    showModalBottomSheet<void>(
++      context: context,
++      isScrollControlled: true,
++      showDragHandle: true,
++      builder: (_) => CapsuleManageSheet(
++        bundles: bundles,
++        tags: _tags,
++        hideDisabled: _hideDisabled,
++        onFilter: (tags, hideDisabled) => setState(() {
++          _tags
++            ..clear()
++            ..addAll(tags);
++          _hideDisabled = hideDisabled;
++        }),
++      ),
++    );
++  }
++
+   @override
+   Widget build(BuildContext context) {
+     final quick = ref.watch(uiOverridesProvider.select((o) => o.config.quickActions)) ?? const <UiQuickAction>[];
+@@ -272,7 +499,14 @@
+     final hidePluginCapsule = ref.watch(uiHiddenProvider(UiHideItem.pluginCapsule));
+     final session = widget.sessionId;
+     final items = [
+-      ...composerCapsules(context, ref, sessionId: session, quick: quick, plugins: plugins),
++      ...composerCapsules(
++        context,
++        ref,
++        sessionId: session,
++        quick: quick,
++        plugins: plugins,
++        onLongPress: _openManage,
++      ).where(_visible),
+       if (!hidePluginCapsule && session != null && ref.watch(chatPluginsHaveContentProvider(session)))
+         CapsuleItem(
+           id: chatPluginsCapsuleId,
+@@ -301,3 +535,196 @@
+     );
+   }
+ }
++
++enum _BatchAction { enable, disable, remove }
++
++String _label(BuildContext context, String zh, String en) =>
++    Localizations.localeOf(context).languageCode == 'en' ? en : zh;
++
++/// 长按胶囊打开：标签筛选、隐藏禁用、批量启用/禁用/卸载。
++///
++/// 只写 App 已有的插件管理接口（`InstalledPluginsController.setEnabled` /
++/// `remove`），一次串行处理，失败的留在列表里并在末尾汇总。
++class CapsuleManageSheet extends ConsumerStatefulWidget {
++  const CapsuleManageSheet({
++    super.key,
++    required this.bundles,
++    required this.tags,
++    required this.hideDisabled,
++    required this.onFilter,
++  });
++
++  final List<PluginBundle> bundles;
++  final Set<String> tags;
++  final bool hideDisabled;
++  final void Function(Set<String> tags, bool hideDisabled) onFilter;
++
++  @override
++  ConsumerState<CapsuleManageSheet> createState() => _CapsuleManageSheetState();
++}
++
++class _CapsuleManageSheetState extends ConsumerState<CapsuleManageSheet> {
++  late final Set<String> _tags = {...widget.tags};
++  late bool _hideDisabled = widget.hideDisabled;
++  final Set<String> _selected = <String>{};
++  bool _busy = false;
++
++  static const _tagKeys = <String>['', 'official', 'local'];
++
++  String _tagLabel(BuildContext context, String key) => switch (key) {
++    'official' => _label(context, '官方', 'Official'),
++    'local' => _label(context, '本地', 'Local'),
++    _ => _label(context, '全部', 'All'),
++  };
++
++  void _toggleTag(String key) {
++    setState(() {
++      if (key.isEmpty) {
++        _tags.clear();
++      } else if (!_tags.remove(key)) {
++        _tags.add(key);
++      }
++    });
++    widget.onFilter(_tags, _hideDisabled);
++  }
++
++  void _setHideDisabled(bool value) {
++    setState(() => _hideDisabled = value);
++    widget.onFilter(_tags, _hideDisabled);
++  }
++
++  Future<void> _run(_BatchAction action) async {
++    if (_busy || _selected.isEmpty) return;
++    final controller = ref.read(installedPluginsProvider.notifier);
++    setState(() => _busy = true);
++    var done = 0;
++    final failed = <String>[];
++    for (final name in _selected.toList()) {
++      PluginBundle? bundle;
++      for (final candidate in widget.bundles) {
++        if (candidate.name == name) {
++          bundle = candidate;
++          break;
++        }
++      }
++      if (bundle == null) continue;
++      try {
++        switch (action) {
++          case _BatchAction.enable:
++            await controller.setEnabled(bundle, true);
++          case _BatchAction.disable:
++            await controller.setEnabled(bundle, false);
++          case _BatchAction.remove:
++            await controller.remove(bundle);
++        }
++        done += 1;
++      } on Object {
++        failed.add(name);
++      }
++    }
++    if (!mounted) return;
++    setState(() {
++      _busy = false;
++      _selected.clear();
++    });
++    final summary = failed.isEmpty
++        ? _label(context, '完成 $done 个', 'Done: $done')
++        : _label(context, '完成 $done 个，失败 ${failed.length} 个', 'Done: $done, failed: ${failed.length}');
++    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(summary)));
++  }
++
++  @override
++  Widget build(BuildContext context) {
++    final bundles = [...widget.bundles]..sort((a, b) => a.name.compareTo(b.name));
++    return SafeArea(
++      child: SizedBox(
++        height: MediaQuery.sizeOf(context).height * 0.7,
++        child: Column(
++          crossAxisAlignment: CrossAxisAlignment.stretch,
++          children: [
++            Padding(
++              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
++              child: Wrap(
++                spacing: 8,
++                runSpacing: 4,
++                children: [
++                  for (final key in _tagKeys)
++                    FilterChip(
++                      label: Text(_tagLabel(context, key)),
++                      selected: key.isEmpty ? _tags.isEmpty : _tags.contains(key),
++                      onSelected: (_) => _toggleTag(key),
++                    ),
++                ],
++              ),
++            ),
++            SwitchListTile(
++              dense: true,
++              value: _hideDisabled,
++              onChanged: _setHideDisabled,
++              title: Text(_label(context, '隐藏已禁用', 'Hide disabled')),
++            ),
++            const Divider(height: 1),
++            Expanded(
++              child: ListView.builder(
++                itemCount: bundles.length,
++                itemBuilder: (context, index) {
++                  final bundle = bundles[index];
++                  final status = capsuleStatusOf(bundle);
++                  final subtitle = [
++                    if (bundle.version != null && bundle.version!.isNotEmpty) 'v${bundle.version}',
++                    switch (status) {
++                      CapsuleStatus.running => _label(context, '运行中', 'Running'),
++                      CapsuleStatus.disabled => _label(context, '已禁用', 'Disabled'),
++                      CapsuleStatus.error => _label(context, '报错', 'Error'),
++                      CapsuleStatus.enabled => '',
++                    },
++                  ].where((s) => s.isNotEmpty).join(' · ');
++                  return CheckboxListTile(
++                    dense: true,
++                    value: _selected.contains(bundle.name),
++                    onChanged: (checked) => setState(() {
++                      if (checked == true) {
++                        _selected.add(bundle.name);
++                      } else {
++                        _selected.remove(bundle.name);
++                      }
++                    }),
++                    title: Text(bundle.name, maxLines: 1, overflow: TextOverflow.ellipsis),
++                    subtitle: subtitle.isEmpty ? null : Text(subtitle),
++                  );
++                },
++              ),
++            ),
++            Padding(
++              padding: const EdgeInsets.all(12),
++              child: Row(
++                children: [
++                  Expanded(
++                    child: FilledButton.tonal(
++                      onPressed: _busy || _selected.isEmpty ? null : () => _run(_BatchAction.enable),
++                      child: Text(_label(context, '启用', 'Enable')),
++                    ),
++                  ),
++                  const SizedBox(width: 8),
++                  Expanded(
++                    child: FilledButton.tonal(
++                      onPressed: _busy || _selected.isEmpty ? null : () => _run(_BatchAction.disable),
++                      child: Text(_label(context, '禁用', 'Disable')),
++                    ),
++                  ),
++                  const SizedBox(width: 8),
++                  Expanded(
++                    child: FilledButton.tonal(
++                      onPressed: _busy || _selected.isEmpty ? null : () => _run(_BatchAction.remove),
++                      child: Text(_label(context, '卸载', 'Remove')),
++                    ),
++                  ),
++                ],
++              ),
++            ),
++          ],
++        ),
++      ),
++    );
++  }
++}
+--- a/app/lib/plugins/native/native_state.dart
++++ b/app/lib/plugins/native/native_state.dart
+@@ -155,10 +155,10 @@
+   ref.onDispose(lifecycle.dispose);
+   final previous = _lastRead[client];
+   try {
+-    final read = await client.contributions(
++    final read = await _contributionsOnce(
++      client,
+       caps,
+-      // A different language or app asks afresh.
+-      previous: previous != null && _lastCaps[client] == caps ? previous : null,
++      previous != null && _lastCaps[client] == caps ? previous : null,
+     );
+     if (read != null) {
+       _lastRead[client] = read;
+@@ -170,6 +170,21 @@
+   }
+ });
+ 
++/// Reads once; on a timeout reads once more before giving up.
++///
++/// 一次超时不算插件坏掉：桥接偶尔慢半拍，重试一次能让状态灯回到正常。
++/// 第二次仍失败就抛给上层（[nativeRawContributionsProvider] 会退回上一次的
++/// 结果，插件本身不会被标记成错误）。
++Future<DshGoContributions?> _contributionsOnce(DshClient client, DshGoCaps caps, DshGoContributions? previous) async {
++  Future<DshGoContributions?> read() => client.contributions(caps, previous: previous);
++  try {
++    return await read();
++  } on Object catch (error) {
++    if (error is! TimeoutException) rethrow;
++    return read();
++  }
++}
++
+ final _lastCaps = Expando<DshGoCaps>('dshGoCaps');
+ 
+ /// Reads the active host's contributions again (a 304 when nothing
+@@ -212,6 +227,14 @@
+   );
+ });
+ 
++/// 胶囊行专用：保留被禁用插件的贡献，好让它们以「已禁用」状态显示。
++/// 其余表面（状态条、菜单、面板）仍走 [nativeContributionsProvider]，不受影响。
++final nativeCapsulePluginsProvider = Provider<List<NativePlugin>>((ref) {
++  final raw = ref.watch(nativeRawContributionsProvider.select((s) => s.value));
++  if (raw == null || raw.plugins.isEmpty) return const <NativePlugin>[];
++  return nativeContributionsFrom(raw, features: ref.watch(nativeFeatureStateProvider).toSet()).plugins;
++});
++
+ /// A plugin's name for people: its own title, else its bundle's, else the
+ /// package name.
+ final nativePluginTitleProvider = Provider.family<String, String>((ref, package) {
+@@ -372,7 +395,7 @@
+ /// Plugin capsules for the composer, switched-on ones, in plugin order
+ /// (2 a plugin; the row caps the total with ui.json's).
+ final nativeComposerActionsProvider = Provider<List<NativeAction>>((ref) {
+-  final plugins = ref.watch(nativeContributionsProvider).plugins;
++  final plugins = ref.watch(nativeCapsulePluginsProvider);
+   return [
+     for (final p in plugins)
+       if (ref.watch(nativeSurfaceOnProvider((p.package, NativeSurface.composerActions)))) ...p.composerActions,
