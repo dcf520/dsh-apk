@@ -47,8 +47,8 @@ jobs:
         working-directory: src
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xz-utils unzip
-                              UPDATE_DEB_LOCK=1 bash runtime/build-runtime.sh arm64-v8a
+          sudo apt-get install -y -qq xz-utils unzip gnupg curl
+          UPDATE_DEB_LOCK=1 bash runtime/build-runtime.sh arm64-v8a
 
       - name: Build APK
         working-directory: src/app
