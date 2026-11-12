@@ -1,0 +1,58 @@
+name: build-apk
+
+on:
+  workflow_dispatch:
+  push:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ccch1mneyyy/dsh-Go
+          path: src
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Apply capsule patch
+        working-directory: src
+        run: git apply --3way "$GITHUB_WORKSPACE/capsule-all.patch"
+
+      - name: Resolve
+        working-directory: src/app
+        run: flutter pub get
+
+      - name: Analyze
+        working-directory: src/app
+        continue-on-error: true
+        run: flutter analyze
+
+      - name: Build APK
+        working-directory: src/app
+        run: flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-go-capsule-apk
+          path: src/app/build/app/outputs/flutter-apk/*.apk
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: capsule-${{ github.run_number }}
+          name: capsule build ${{ github.run_number }}
+          files: src/app/build/app/outputs/flutter-apk/*.apk
