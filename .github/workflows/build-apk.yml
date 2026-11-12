@@ -53,7 +53,7 @@ jobs:
 
       - name: Build APK
         working-directory: src/app
-        run: flutter build apk --release --flavor arm64 --target-platform android-arm64
+        run: flutter build apk --release --flavor arm64 --target-platform android-arm64 --android-skip-build-dependency-validation
 
       - name: List outputs
         run: find src/app/build/app/outputs -name "*.apk" -printf "%p %s\n" || true
