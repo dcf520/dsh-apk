@@ -22,9 +22,11 @@ jobs:
       - name: Apply capsule patch
         working-directory: src
         run: |
-          git log -1 --oneline
-          git apply --3way "$GITHUB_WORKSPACE/capsule-all.patch" || patch -p1 -F3 < "$GITHUB_WORKSPACE/capsule-all.patch"
-          git diff --stat
+          set -o pipefail
+          git log -1 --oneline | tee /tmp/meta.log
+          git apply --3way "$GITHUB_WORKSPACE/capsule-all.patch" 2>&1 | tee /tmp/apply.log \
+            || patch -p1 -F3 < "$GITHUB_WORKSPACE/capsule-all.patch" 2>&1 | tee -a /tmp/apply.log
+          git diff --stat | tee -a /tmp/apply.log
 
       - uses: actions/setup-java@v4
         with:
@@ -37,25 +39,37 @@ jobs:
           cache: true
 
       - name: Toolchain
-        run: flutter --version
+        run: flutter --version 2>&1 | tee /tmp/meta.log
 
       - name: Resolve
         working-directory: src/app
-        run: flutter pub get
+        run: flutter pub get 2>&1 | tee /tmp/pub.log
 
       - name: Build runtime (arm64)
         working-directory: src
         run: |
+          set -o pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq xz-utils unzip gnupg curl
-          UPDATE_DEB_LOCK=1 bash runtime/build-runtime.sh arm64-v8a
+          sudo apt-get install -y -qq xz-utils unzip gnupg gpgv curl
+          UPDATE_DEB_LOCK=1 bash runtime/build-runtime.sh arm64-v8a 2>&1 | tee /tmp/runtime.log
 
       - name: Build APK
         working-directory: src/app
-        run: flutter build apk --release --flavor arm64 --target-platform android-arm64 --android-skip-build-dependency-validation
+        run: flutter build apk --release --flavor arm64 --target-platform android-arm64 --android-skip-build-dependency-validation 2>&1 | tee /tmp/build.log
 
-      - name: List outputs
-        run: find src/app/build/app/outputs -name "*.apk" -printf "%p %s\n" || true
+      - name: Keep logs on failure
+        if: failure()
+        run: |
+          mkdir -p logs
+          for f in meta apply pub runtime build; do
+            if [ -f "/tmp/$f.log" ]; then cp "/tmp/$f.log" "logs/$f.log"; fi
+          done
+          ls -l logs
+          git config user.name dsh
+          git config user.email dsh@local
+          git add logs
+          git commit -m "ci logs run $GITHUB_RUN_NUMBER [skip ci]" || true
+          git push --force origin HEAD:ci-logs || true
 
       - uses: actions/upload-artifact@v4
         with:
@@ -66,5 +80,4 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: capsule-${{ github.run_number }}
-          name: capsule build ${{ github.run_number }}
           files: src/app/build/app/outputs/flutter-apk/*.apk
