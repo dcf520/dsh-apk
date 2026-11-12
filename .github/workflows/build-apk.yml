@@ -27,6 +27,8 @@ jobs:
           git apply --3way "$GITHUB_WORKSPACE/capsule-all.patch" 2>&1 | tee /tmp/apply.log \
             || patch -p1 -F3 < "$GITHUB_WORKSPACE/capsule-all.patch" 2>&1 | tee -a /tmp/apply.log
           git diff --stat | tee -a /tmp/apply.log
+          sed -i 's/applicationId = "io.github.ccch1mneyyy.dsh_app"/applicationId = "io.github.ccch1mneyyy.dsh_app.capsule"/' app/android/app/build.gradle.kts
+
 
       - uses: actions/setup-java@v4
         with:
