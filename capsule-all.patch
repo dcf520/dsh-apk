@@ -12,7 +12,7 @@
  import '../../../l10n/l10n.dart';
  import '../../../plugins/native/native_model.dart';
  import '../../../plugins/native/native_state.dart';
-+import '../../../state/plugins/installed_plugins.dart';
++import '../../../state/plugins_state.dart';
  import '../../../ui_config/ui_config_model.dart';
  import '../../../ui_config/ui_config_state.dart';
  import '../../common/edge_fade.dart';
@@ -656,7 +656,7 @@
      );
      if (read != null) {
        _lastRead[client] = read;
-@@ -170,6 +170,21 @@
+@@ -170,6 +170,25 @@
    }
  });
  
@@ -665,7 +665,11 @@
 +/// 一次超时不算插件坏掉：桥接偶尔慢半拍，重试一次能让状态灯回到正常。
 +/// 第二次仍失败就抛给上层（[nativeRawContributionsProvider] 会退回上一次的
 +/// 结果，插件本身不会被标记成错误）。
-+Future<DshGoContributions?> _contributionsOnce(DshClient client, DshGoCaps caps, DshGoContributions? previous) async {
++Future<DshGoContributions?> _contributionsOnce(
++  NativeBridge client,
++  DshGoCaps caps,
++  DshGoContributions? previous,
++) async {
 +  Future<DshGoContributions?> read() => client.contributions(caps, previous: previous);
 +  try {
 +    return await read();
@@ -678,7 +682,7 @@
  final _lastCaps = Expando<DshGoCaps>('dshGoCaps');
  
  /// Reads the active host's contributions again (a 304 when nothing
-@@ -212,6 +227,14 @@
+@@ -212,6 +231,14 @@
    );
  });
  
@@ -693,7 +697,7 @@
  /// A plugin's name for people: its own title, else its bundle's, else the
  /// package name.
  final nativePluginTitleProvider = Provider.family<String, String>((ref, package) {
-@@ -372,7 +395,7 @@
+@@ -372,7 +399,7 @@
  /// Plugin capsules for the composer, switched-on ones, in plugin order
  /// (2 a plugin; the row caps the total with ui.json's).
  final nativeComposerActionsProvider = Provider<List<NativeAction>>((ref) {
