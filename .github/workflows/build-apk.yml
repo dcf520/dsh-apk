@@ -10,7 +10,7 @@ permissions:
 jobs:
   apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -18,6 +18,13 @@ jobs:
         with:
           repository: ccch1mneyyy/dsh-Go
           path: src
+
+      - name: Apply capsule patch
+        working-directory: src
+        run: |
+          git log -1 --oneline
+          git apply --3way "$GITHUB_WORKSPACE/capsule-all.patch" || patch -p1 -F3 < "$GITHUB_WORKSPACE/capsule-all.patch"
+          git diff --stat
 
       - uses: actions/setup-java@v4
         with:
@@ -29,27 +36,33 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Apply capsule patch
-        working-directory: src
-        run: git apply --3way "$GITHUB_WORKSPACE/capsule-all.patch"
+      - name: Toolchain
+        run: flutter --version
 
       - name: Resolve
         working-directory: src/app
         run: flutter pub get
 
-      - name: Analyze
-        working-directory: src/app
+      - name: Build runtime (arm64)
+        working-directory: src
         continue-on-error: true
-        run: flutter analyze
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xz-utils unzip
+          bash runtime/build-runtime.sh arm64
 
       - name: Build APK
         working-directory: src/app
-        run: flutter build apk --release
+        run: flutter build apk --release --flavor arm64 --target-platform android-arm64
+
+      - name: List outputs
+        run: find src/app/build/app/outputs -name "*.apk" -printf "%p %s\n" || true
 
       - uses: actions/upload-artifact@v4
         with:
           name: dsh-go-capsule-apk
           path: src/app/build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: warn
 
       - uses: softprops/action-gh-release@v2
         with:
